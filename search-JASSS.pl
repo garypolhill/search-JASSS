@@ -34,11 +34,12 @@ my $n_context = 75;
 my $include_forum = 0;
 my $include_reviews = 0;
 my $include_research = 1;
+my $max_hist_bins = 10;
 
 # Process command-line arguments
 
 if(scalar(@ARGV) == 0) {
-  die "Usage: $0 <summary.md> <search terms...>";
+  die "Usage: $0 <summary.md> <search terms...>\n";
 }
 
 while($ARGV[0] =~ /^-/) {
@@ -80,7 +81,7 @@ $0 {options...} <summary file> <search terms...>
     summary file: markdown format file giving detailed search results
     search terms...: one or more (case insensitive) search terms
 
-   options...:
+    options...:
 \t-a (--include-all): search review, forum and research articles
 \t-c (--context): number of characters to display around each occurrence
 \t-f (--include-forum): include forum articles in the search
@@ -89,6 +90,7 @@ $0 {options...} <summary file> <search terms...>
 \t-r (--include-reviews): include review articles in the search
 \t-R (--only-reviews): only search review articles
 USAGE_END
+    exit 0;
   }
   else {
     die "Option $option not recognized\n";
@@ -100,6 +102,9 @@ my @search_terms = @ARGV;
 
 if($include_research + $include_reviews + $include_forum == 0) {
   die "The options you've selected to search for articles mean none will be searched.\n"
+}
+if(scalar(@search_terms) == 0) {
+  die "No search terms provided.\n";
 }
 
 my $searched_text;
@@ -194,10 +199,13 @@ else {
 
 my %sentences;  # Search-term -> article URL -> [sentences]
 my %counts;     # Search-term -> count of appearances
+my %hists;      # Search-term -> array of counts (index + 1 = n)
+my $max_n = 0;
 
 foreach my $search_term(@search_terms) {
   $counts{$search_term} = 0;
   $sentences{$search_term} = {};
+  $hists{$search_term} = [];
 }
 
 my $n_searched = 0;
@@ -219,8 +227,11 @@ foreach my $article (@articles) {
   foreach my $search_term (@search_terms) {
     if($text =~ /\W$search_term\W/i) {
       $counts{$search_term}++;
-      $sentences{$search_term}->{$$article[0]} =
-        &extract_sentences($$article[0], $text, $search_term);
+      my $sent_arr = &extract_sentences($$article[0], $text, $search_term);
+      $sentences{$search_term}->{$$article[0]} = $sent_arr;
+      my $n = scalar(@$sent_arr);
+      $hists{$search_term}->[$n]++;
+      $max_n = $n if $max_n < $n;
     }
   }
 }
@@ -228,9 +239,48 @@ foreach my $article (@articles) {
 # Print the results
 
 print "Searched $n_searched of ", scalar(@articles), " articles\n";
-print "Search Term,Number of Articles\n";
+
+my $bins = $max_n;
+my $binterval = 1;
+if($bins > $max_hist_bins) {
+  $bins = $max_hist_bins;
+  $binterval = $max_n / $max_hist_bins;
+  if(int($binterval) != $binterval) {
+    $binterval = 1 + int($binterval);
+  }
+}
+
+print "Search Term,Number of Articles";
+my $n_times = 0;
+my %hist_bins;
 foreach my $search_term (sort @search_terms) {
-  print "$search_term,$counts{$search_term}\n";
+  my @array;
+  my $times_min = 0;
+  my $times_max = $binterval;
+  for(my $i = 0; $i < $bins; $i++) {
+    $array[$i] = 0;
+    my @hist = @{$hists{$search_term}};
+    for(my $j = $times_min; $j <= $#hist && $j < $times_max; $j++) {
+      $array[$i] += $hist[$j];
+    }
+    $times_min = $times_max;
+    $times_max += $binterval;
+  }
+  $hist_bins{$search_term} = \@array;
+}
+for(my $i = 1; $i <= $bins; $i++) {
+  print ",$n_times.gt.X.le.";
+  $n_times += $binterval;
+  print "$n_times";
+}
+print "\n";
+foreach my $search_term (sort @search_terms) {
+  print "$search_term,$counts{$search_term}";
+  my @histo = @{$hist_bins{$search_term}};
+  for(my $i = 0; $i <= $#histo; $i++) {
+    print ",$histo[$i]";
+  }
+  print "\n";
 }
 
 # Save a markdown file
