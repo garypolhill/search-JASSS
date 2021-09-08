@@ -1,4 +1,6 @@
-#!/usr/bin/perl
+#!/usr/bin/perl -CSDA
+#
+# N.B. -CSDA instructs Perl to treat all filehandles as UTF-8 by default
 #
 # search-JASSS.pl
 #
@@ -21,6 +23,8 @@
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+# WordNet (R) is a registered tradename of Princeton University
+# Princeton University (2010) "About WordNet" https://wordnet.princeton.edu.
 use strict;
 use WWW::Mechanize;
 use Time::Piece;
@@ -30,7 +34,7 @@ use Time::Piece;
 my $index_url = "http://www.jasss.org/index_by_issue.html";
                 # Update this if the JASSS website is changed. It is
                 # the webpage to search for URLs of JASSS articles.
-my $adent_id = "search-JASSS v2021-09-06"
+my $agent_id = "search-JASSS v2021-09-06";
 my $n_context = 75;
 my $include_forum = 0;
 my $include_reviews = 0;
@@ -44,6 +48,15 @@ my $cache = 0;
 my $cache_dir;
 my $do_hist = 0;
 my $hist_file;
+my $save_tags = 0;
+my $min_freq = 1;
+my $keywords = 0;
+my $keywords_url = "https://www.jasss.org/keywords.html";
+my %kw;
+my $tag_file;
+my $use_word_net = 0;
+my $wn = "/usr/local/WordNet-3.0/bin/wn";
+my $max_polysemy = 10;
 my %tags;       # Counts of tags and special characters in paragraph text found
 my @ignore_words = ("a", "able", "about", "above", "absolute", "absolutely", "actual",
                       "actually", "afore", "aforementioned", "after", "again", "against",
@@ -162,7 +175,7 @@ while($ARGV[0] =~ /^-/) {
     $include_forum = 0;
     $include_research = 0;
   }
-  elsif($option eq "-t" || $option eq "--text-all") {
+  elsif($option eq "-T" || $option eq "--text-all") {
     $only_text = 0;
   }
   elsif($option eq "-c" || $option eq "--context") {
@@ -192,6 +205,49 @@ while($ARGV[0] =~ /^-/) {
     $max_hist_bins = shift(@ARGV);
     $do_hist = 1;
   }
+  elsif($option eq "-t" || $option eq "--save-tags") {
+    $save_tags = 1;
+    $tag_file = shift(@ARGV);
+  }
+  elsif($option eq "-m" || $option eq "--minimum-frequency") {
+    $min_freq = shift(@ARGV);
+  }
+  elsif($option eq "-k" || $option eq "--include-keywords") {
+    $keywords = 1;
+  }
+  elsif($option eq "-K" || $option eq "--keywords-url") {
+    $keywords = 1;
+    $keywords_url = shift(@ARGV);
+  }
+  elsif($option eq "-j" || $option eq "--jasss-url") {
+    $index_url = shift(@ARGV);
+  }
+  elsif($option eq "-i" || $option eq "--agent-id") {
+    $agent_id = shift(@ARGV);
+  }
+  elsif($option eq "-w" || $option eq "--use-WordNet") {
+    if(-x "$wn") {
+      $use_word_net = 1;
+    }
+    else {
+      warn "WordNet $wn is not executable -- ignoring $option\n";
+    }
+  }
+  elsif($option eq "-W" || $option eq "--with-WordNet") {
+    $wn = shift(@ARGV);
+    if(-x "$wn") {
+      open(FP, "-|", "$wn -l") or die "Cannot open pipe from $wn -l: $!\n";
+      my $line = <FP>;
+      if($line !~ /^WordNet Release/) {
+        die "$wn doesn't look like WordNet to me\n";
+      }
+      close(FP);
+      $use_word_net = 1;
+    }
+  }
+  elsif($option eq "-p" || $option eq "--maximum-polysemy") {
+    $max_polysemy = shift(@ARGV);
+  }
   elsif($option eq "-h" || $option eq "--help") {
     print <<USAGE_END;
 $0 {options...} <summary file> <search terms...>
@@ -211,10 +267,17 @@ $0 {options...} <summary file> <search terms...>
 \t-F (--only-forum): only search forum articles
 \t-h (--help): display this message
 \t-H (--histogram) <file>: prepare a histogram in CSV file with $max_hist_bins bins
-\t-r (--include-reviews): include review articles in the search (requires -t)
-\t-R (--only-reviews): only search review articles (requires -t)
+\t-i (--agent-id) <ID>: agent ID to use in HTTP GET
+\t-j (--jasss-url) <URL>: page to access JASSS index from (default $index_url)
+\t-k (--include-keywords): include keywords in concordance
+\t-K (--keywords-url) <URL>: page to load keywords from (default $keywords_url)
+\t-m (--minimum-frequency) <n>: only include papers mentioning search term >= n times
+\t-p (--maximum-polysemy) <n>: maximum polysemy count to include term in concordance
+\t-r (--include-reviews): include review articles in the search (requires -T)
+\t-R (--only-reviews): only search review articles (requires -T)
 \t-s (--save-cache) <dir>: cache downloaded articles in dir
-\t-t (--text-all): search in all text not just numbered paragraphs (allows -r and -R)
+\t-T (--text-all): search in all text not just numbered paragraphs (allows -r and -R)
+\t-t (--save-tags) <file>: save tags in paragraph text to CSV file
 \t-u (--use-cache) <dir>: use cache in dir
 USAGE_END
     exit 0;
@@ -243,7 +306,7 @@ if($cache > 0) {
     die "Cache directory $cache_dir exists, but not as a directory\n";
   }
   if(!(-d "$cache_dir")) {
-    mkdir(0777, $cache_dir) or die "Cannot create cache directory $cache_dir: $!\n";
+    mkdir($cache_dir) or die "Cannot create cache directory $cache_dir: $!\n";
   }
   else {
     warn "Cache directory $cache_dir exists -- files will be over-written\n";
@@ -295,7 +358,7 @@ else {
   $searched_text = "forum articles";
 }
 
-# Extract a list of JASSS articles
+# Extract a list of JASSS articles from the index page
 
 my $search_time = localtime->datetime;
 my $index = WWW::Mechanize->new(agent => $agent_id);
@@ -352,6 +415,33 @@ else {
     $index_url, "\". Searching ", scalar(@articles), ".\n";
 }
 
+if($keywords) {
+  $index->get($keywords_url);
+  if(!$index->success()) {
+    die "Could not load JASSS keywords URL \"$keywords_url\": HTTP response code ",
+      $index->status(), "\n";
+  }
+  if(!$index->is_html()) {
+    die "Content type of JASSS keywords URL \"$keywords_url\" is not HTML\n";
+  }
+
+  my $html = $index->content();
+
+  foreach my $htmlkw (split(/(<dt><b>[^<]+<\/b><\/dt>)/, $html)) {
+    if($htmlkw =~ /^<dt><b>\s*([^<]+)\s*<\/b><\/dt>$/) {
+      my $keyword = $1;
+      $keyword =~ tr/A-Z/a-z/;
+      $keyword =~ s/^\s+//; # Paranoia given \s* in match
+      $keyword =~ s/\s+$//; # More paranoia
+      $keyword =~ s/\s+/ /;
+      my @kwwords = split(/\s+|-/, $keyword);
+      $kw{$keyword} = \@kwwords;
+    }
+  }
+
+  print "Found ", scalar(keys(%kw)), " keywords from $keywords_url\n";
+}
+
 # Now search each of the articles for the term
 
 my %sentences;  # Search-term -> article URL -> [sentences]
@@ -391,11 +481,10 @@ foreach my $article (@articles) {
       warn "Could not load article URL \"$$article[0]\": HTTP response code ",
         $index->status(), "\n";
         next;
-      }
-      if(!$index->is_html()) {
-        warn "Context type of article URL \"$$article[0]\" is not HTML\n";
-        next;
-      }
+    }
+    if(!$index->is_html()) {
+      warn "Context type of article URL \"$$article[0]\" is not HTML\n";
+      next;
     }
     $html = $index->content();
     $text = $index->text();
@@ -409,6 +498,8 @@ foreach my $article (@articles) {
       close(FP);
     }
   }
+
+  $html = &uncomment_html($html);
 
   $n_searched++;
 
@@ -434,8 +525,8 @@ foreach my $article (@articles) {
         open(FP, ">", $cache_para) or die "Cannot create cached paragraph text file $cache_para: $!\n";
 
         foreach my $para (sort {
-          ($a_sec, $a_no) = split(/\./, $a);
-          ($b_sec, $b_no) = split(/\./, $b);
+          my ($a_sec, $a_no) = split(/\./, $a);
+          my ($b_sec, $b_no) = split(/\./, $b);
 
           $a_sec <=> $b_sec || $a_no <=> $b_no;
         } keys(%paras)) {
@@ -454,8 +545,8 @@ foreach my $article (@articles) {
     my @all_sentences;
 
     foreach my $para (sort {
-      ($a_sec, $a_no) = split(/\./, $a);
-      ($b_sec, $b_no) = split(/\./, $b);
+      my ($a_sec, $a_no) = split(/\./, $a);
+      my ($b_sec, $b_no) = split(/\./, $b);
 
       $a_sec <=> $b_sec || $a_no <=> $b_no;
     } keys(%paras)) {
@@ -485,21 +576,31 @@ foreach my $article (@articles) {
 # Print the results
 
 print "Searched $n_searched of ", scalar(@articles), " articles\n";
-if($only_text) {
-  foreach my $tag (sort { $a cmp $b } keys(%tags)) {
-    if(substr($tag, -2, 1) ne "/") {
-      my $close_tag = substr($tag, 0, -1)."/>";
-      if(defined($tags{$close_tag})) {
-        print "Tag $tag appeared $tags{$tag} times, and $close_tag $tags{$close_tag} times in numbered paragraph HTML\n";
+if($only_text && $save_tags) {
+  open(FP, ">", $tag_file) or die "Cannot open save tags file $tag_file: $!\n";
+  print FP "Tag,Close,Frequency,Close.Freq\n";
+  foreach my $tag (sort { $tags{$b} <=> $tags{$a} } keys(%tags)) {
+    if(substr($tag, 0, 1) eq "&") {
+      print FP "$tag,NA,$tags{$tag},NA\n";
+    }
+    elsif(substr($tag, 1, 1) ne "/") {
+      if(substr($tag, -2, 1) eq "/") {
+        print FP "$tag,NA,$tags{$tag},NA\n";
       }
       else {
-        print "Tag $tag appeared $tags{$tag} times, with no $close_tag in numbered paragraph HTML\n";
+        my $close_tag = "</".substr($tag, 1);
+        if(defined($tags{$close_tag})) {
+          print FP "$tag,$close_tag,$tags{$tag},$tags{$close_tag}\n";
+        }
+        else {
+          print FP "$tag,$close_tag,$tags{$tag},0\n";
+        }
       }
     }
     else {
-      my $open_tag = substr($tag, 0, -2).">";
+      my $open_tag = "<".substr($tag, 2);
       if(!defined($tags{$open_tag})) {
-        print "Tag $tag appeared $tags{$tag} times, with no $open_tag in numbered paragraph HTML\n";
+        print FP "$open_tag,$tag,0,$tags{$tag}\n";
       }
     }
   }
@@ -555,6 +656,12 @@ if($do_hist) {
   close(FP);
 }
 
+# Save the concordance
+
+if($concordance) {
+  &save_concordance();
+}
+
 # Save a markdown file
 
 open(FP, ">", $summary_file)
@@ -565,7 +672,8 @@ print FP "Search (using [search-JASSS.pl](https://github.com/garypolhill/search-
   "of $n_searched articles out of all the ", scalar(@articles)," JASSS ",
   "$searched_text listed on the [JASSS article index page]($index_url) as at ",
   "$search_time. Search is for whole words (case insensitive), and articles are ",
-  "listed in descending order of the number of times the search term appears.\n";
+  "listed in descending order of the number of times the search term appears, ",
+  "with a minimum occurrence of $min_freq.\n";
 foreach my $search_term (sort @search_terms) {
 
   if($counts{$search_term} > 0) {
@@ -575,10 +683,14 @@ foreach my $search_term (sort @search_terms) {
         scalar(@{$sentences{$search_term}->{$b}}) <=> scalar(@{$sentences{$search_term}->{$a}})
       } keys(%{$sentences{$search_term}})) {
 
-      print FP "### Article [$article]($article)\n";
+      my $n = scalar(@{$sentences{$search_term}->{$article}});
 
-      foreach my $sentence (@{$sentences{$search_term}->{$article}}) {
-        print FP "  + $sentence\n";
+      if($n >= $min_freq) {
+        print FP "### Article [$article]($article) ($n times)\n";
+
+        foreach my $sentence (@{$sentences{$search_term}->{$article}}) {
+          print FP "  + $sentence\n";
+        }
       }
     }
   }
@@ -648,11 +760,32 @@ sub extract_paragraph_text {
   if($html =~ /<a name="\d+\.\d+">/i) {
     @parts = split(/(<a name="\d+\.\d+">)/i, $html);
   }
+  elsif($html =~ /<a name=\d+\.\d+>/i) {
+    @parts = split(/(<a name=\d+\.\d+>)/i, $html);
+  }
+  elsif($html =~ /<a name='\d+\.\d+'>/i) {
+    @parts = split(/(<a name='\d+\.\d+'>)/i, $html);
+  }
+  elsif($html =~ /<a name="\d+\.\d+" id="\d+\.\d+">/i) {
+    @parts = split(/(<a name="\d+\.\d+" id="\d+\.\d+">)/i, $html);
+  }
+  elsif($html =~ /<a name="\d+\.\d+" >/i) {
+    @parts = split(/(<a name="\d+\.\d+" >)/i, $html);
+  }
   elsif($html =~ /<dt class="numbered" id="par\d+\.\d+">/i) {
     @parts = split(/(<dt class="numbered" id="par\d+\.\d+">)/i, $html);
   }
+  elsif($html =~ /<p class="numbered" id="par\d+\.\d+">/i) {
+    @parts = split(/(<p class="numbered" id="par\d+\.\d+">)/i, $html);
+  }
   elsif($html =~ /<p id="\d+.\d+">/i) {
     @parts = split(/(<p id="\d+.\d+">)/i, $html);
+  }
+  elsif($html =~ /<p id ="\d+.\d+">/i) {
+    @parts = split(/(<p id ="\d+.\d+">)/i, $html);
+  }
+  elsif($html =~ /<p id=\d+.\d+>/i) {
+    @parts = split(/(<p id=\d+.\d+>)/i, $html);
   }
   else {
     warn "Cannot find paragraph identification tags in article $vol/$iss/$no\n";
@@ -663,17 +796,18 @@ sub extract_paragraph_text {
     my $idtag = shift(@parts);
     my $text = shift(@parts);
     my $id;
-    if($idtag =~ /(\d+.\d+))/) {
+    if($idtag =~ /(\d+.\d+)/) {
       $id = $1;
     }
     else {
       die "Could not extract paragraph ID from tag \"$idtag\" in article $vol/$iss/$no\n";
     }
     # Headings, tables and figures act as terminators for the text
-    $text =~ s/<table.*$//; # Some articles use tables to position figures
-    $text =~ s/<h\d+.*$//;
-    $text =~ s/<figure.*$//;
-    $text =~ s/<pre.*$//; # Code too
+    $text =~ s/<table.*$//i; # Some articles use tables to position figures
+    $text =~ s/<h\d+.*$//i;
+    $text =~ s/<figure.*$//i;
+    $text =~ s/<section.*$//i;
+    $text =~ s/<pre.*$//i; # Code too
     $text = &untag_text($text);
     $paras{$id} = $text;
   }
@@ -683,14 +817,17 @@ sub extract_paragraph_text {
 sub untag_text {
   my ($html) = @_;
 
-  my @markup = split(/(<[^>]+>)/, $html);
+  my @markup = split(/(<[a-zA-Z\/][^>]*>)/, $html); # Several papers don't &lt;
   my $text = "";
   foreach my $mu (@markup) {
     if(substr($mu, 0, 1) eq "<" && substr($mu, -1, 1) eq ">") {
+      $mu =~ s/\s+\S+="[^"]+"//g; # Remove attributes
+      $mu =~ s/\s+\S+='[^']+'//g; # Remove attributes
+      $mu =~ s/\s+\S+=\S+//g;     # Remove attributes
       $tags{$mu}++;
     }
     else {
-      my @special = split(/(&\w+;)/, $mu);
+      my @special = split(/(&[^; ]+;)/, $mu);
       foreach my $sp (@special) {
         if(substr($sp, 0, 1) eq "&" && substr($sp, -1, 1) eq ";") {
           $tags{$sp}++;
@@ -716,8 +853,18 @@ sub do_concordance {
   my @phrases = split(/[.;,:'"()!?]/, $para);
 
   foreach my $phrase (@phrases) {
-    $lc_phrase = $phrase;
+    my $lc_phrase = $phrase;
     $lc_phrase =~ tr/A-Z/a-z/;
+    $lc_phrase =~ s/\s+/ /;
+    my %added;
+    if($keywords) {
+      foreach my $keyword (keys(%kw)) {
+        if(index($lc_phrase, $keyword) >= 0) {
+          push(@{$concord{$keyword}}, [$url, $para]);
+          $added{$keyword} = 1;
+        }
+      }
+    }
     my @words = split(/\s+|-/, $lc_phrase);
     my @digrams;
     my @trigrams;
@@ -731,14 +878,173 @@ sub do_concordance {
     }
     foreach my $word (@words) {
       if(!defined($ignore{$word})) {
-        push(@{$concord{$word}}, [$url, $para]);
+        if(!defined($added{$word})) {
+          push(@{$concord{$word}}, [$url, $para]);
+        }
+        else {
+          undef($added{$word});
+        }
       }
     }
     foreach my $word (@digrams) {
-      push(@{$concord{$word}}, [$url, $para]);
+      if(!defined($added{$word})) {
+        push(@{$concord{$word}}, [$url, $para]);
+      }
+      else {
+        undef($added{$word});
+      }
     }
     foreach my $word (@trigrams) {
-      push(@{$concord{$word}}, [$url, $para]);
+      if(!defined($added{$word})) {
+        push(@{$concord{$word}}, [$url, $para]);
+      }
+      else {
+        undef($added{$word});
+      }
     }
   }
+}
+
+sub save_concordance {
+  open(FP, ">", $concordance_file)
+    or die "Cannot create concordance file $concordance_file: $!\n";
+
+  if(substr($concordance_file, -4) eq ".csv") {
+    print FP "Term,Term.N,", ($use_word_net ? "Familiarity," : ""),
+      ($keywords ? "Keyword," : ""), "Article,Article.N,Para,Para.N\n";
+  }
+  else {
+    print FP "# Concordance of [JASSS]($index_url) articles $search_time\n";
+    if($use_word_net) {
+      print FP "Familiarity (polysemy count) provided by ",
+        "[WordNet](https://wordnet.princeton.edu), which is a registered trade ",
+        "name of Princeton University\n";
+    }
+    if($keywords) {
+      print FP "Concordance includes JASSS's list of [keywords]($keywords_url)\n";
+    }
+  }
+
+  foreach my $term (sort {$a <=> $b} keys(%concord)) {
+
+    my $familiarity = ($use_word_net ? &wn_familiarity($term) : 0);
+
+    if($familiarity <= $max_polysemy || defined($kw{$term})) {
+      my @refs = @{$concord{$term}};
+      my $n = scalar(@refs);
+
+      my %urls;
+      my %paras;
+      foreach my $ref (@refs) {
+        my ($url, $para) = @$ref;
+
+        $url =~ tr/A-Z/a-z/;
+
+        $urls{$url}++;
+
+        $paras{"$url#$para"}++;
+      }
+
+      my $prev_url;
+      foreach my $paraurl (sort {
+        my ($ua, $pa) = split(/\#/, $a);
+        my ($ub, $pb) = split(/\#/, $b);
+
+        my ($ha, $ba, $da, $ua1, $ua2, $ua3) = split(/\//, $ua);
+        my ($hb, $bb, $db, $ub1, $ub2, $ub3) = split(/\//, $ub);
+
+        my ($pa1, $pa2) = split(/\./, $pa);
+        my ($pb1, $pb2) = split(/\./, $pb);
+
+        $ua1 <=> $ub1 || $ua2 <=> $ub2 || $ua3 <=> $ub3 || $pa1 <=> $pb1 || $pa2 <=> $pb2;
+      } keys(%paras)) {
+
+        my ($url, $para) = split(/\#/, $paraurl);
+
+        my $short_url = $url;
+        $short_url =~ s/^https?:\/\///;
+        $short_url =~ s/\.html?$//;
+        my @su = split(/\//, $short_url);
+        shift(@su); # Chuck out the domain
+        $short_url = join("/", @su);
+
+        if(substr($concordance_file, -4) eq ".csv") {
+          print FP "$term,$n,";
+          print FP "$familiarity," if $use_word_net;
+          print FP (defined($kw{$term}) ? "T," : "F,") if $keywords;
+          print FP "$short_url,$urls{$url},$short_url#$para,$paras{$paraurl}\n";
+        }
+        else {
+          print FP "\n## $term ($n)\n" if !defined($prev_url);
+          if(!defined($prev_url) || $url ne $prev_url) {
+            print FP "\n### [$short_url]($url) ($urls{$url})";
+            $prev_url = $url;
+          }
+          else {
+            print FP ", ";
+          }
+          print FP "[$para]($paraurl) ($paras{$paraurl})";
+        }
+      }
+    }
+  }
+  print FP "\n" if substr($concordance_file, -4) ne ".csv";
+
+  close(FP);
+}
+
+sub uncomment_html {
+  my ($html) = @_;
+
+  my @comments = split(/(<!--|-->)/, $html);
+
+  my $uncomment;
+
+  my $incomment = 0;
+
+  foreach my $comment (@comments) {
+    if(!$incomment && $comment eq "<!--") {
+      $incomment = 1;
+    }
+    elsif($incomment && $comment eq "-->") {
+      $incomment = 0;
+    }
+    else {
+      $uncomment .= $comment;
+    }
+  }
+
+  return $uncomment;
+}
+
+sub wn_familiarity {
+  my ($term) = @_;
+
+  my @famls;
+  open(FP, "-|", "$wn \"$term\"")
+    or die "Cannot open pipe from WordNet $wn \"$term\": $!\n";
+  while(my $line = <FP>) {
+    if($line =~ /\s(-faml.)\s/) {
+      push(@famls, $1);
+    }
+  }
+  close(FP);
+  if(scalar(@famls) == 0) {
+    return 0;
+  }
+  my $tfaml = 0;
+  foreach my $faml (@famls) {
+    open(FP, "-|", "$wn \"$term\" $faml")
+      or die "Cannot open pipe from WordNet $wn \"$term\" $faml: $!\n";
+
+    while(my $line = <FP>) {
+      if($line =~ /polysemy count = (\d+)/) {
+        $tfaml += $1;
+      }
+    }
+
+    close(FP);
+  }
+
+  return $tfaml / scalar(@famls);
 }
