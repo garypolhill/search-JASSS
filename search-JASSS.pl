@@ -35,7 +35,6 @@ my $index_url = "http://www.jasss.org/index_by_issue.html";
                 # Update this if the JASSS website is changed. It is
                 # the webpage to search for URLs of JASSS articles.
 my $agent_id = "search-JASSS v2021-09-06";
-my $n_context = 75;
 my $include_forum = 0;
 my $include_reviews = 0;
 my $include_research = 1;
@@ -43,6 +42,7 @@ my $max_hist_bins = 10;
 my $only_text = 1;
 my $concordance = 0;
 my $concordance_file;
+my $concordance_md = 0;
 my %concord;
 my $cache = 0;
 my $cache_dir;
@@ -56,8 +56,13 @@ my %kw;
 my $tag_file;
 my $use_word_net = 0;
 my $wn = "/usr/local/WordNet-3.0/bin/wn";
-my $max_polysemy = 10;
+my $max_polysemy = 0;
 my %tags;       # Counts of tags and special characters in paragraph text found
+my %titles;
+my %auyr;
+my %years;
+my %n_occurs;
+my $do_search = 1;
 my @ignore_words = ("a", "able", "about", "above", "absolute", "absolutely", "actual",
                       "actually", "afore", "aforementioned", "after", "again", "against",
                       "al", "all", "almost", "already", "alright", "also", "although",
@@ -148,10 +153,6 @@ my %ignore;
 
 # Process command-line arguments
 
-if(scalar(@ARGV) == 0) {
-  die "Usage: $0 <summary.md> <search terms...>\n";
-}
-
 while($ARGV[0] =~ /^-/) {
   my $option = shift(@ARGV);
 
@@ -177,9 +178,6 @@ while($ARGV[0] =~ /^-/) {
   }
   elsif($option eq "-T" || $option eq "--text-all") {
     $only_text = 0;
-  }
-  elsif($option eq "-c" || $option eq "--context") {
-    $n_context = shift(@ARGV);
   }
   elsif($option eq "-i" || $option eq "--index") {
     $index_url = shift(@ARGV);
@@ -247,38 +245,50 @@ while($ARGV[0] =~ /^-/) {
   }
   elsif($option eq "-p" || $option eq "--maximum-polysemy") {
     $max_polysemy = shift(@ARGV);
+    $use_word_net = 1;
   }
   elsif($option eq "-h" || $option eq "--help") {
     print <<USAGE_END;
 $0 {options...} <summary file> <search terms...>
+$0 {other options...} --concordance <CSV file>
+$0 {other options...} --concordance <CSV file> <concordance markdown file>
+$0 --help
 
     Search for research articles in JASSS at $index_url
-    and then download and search those articles for the search terms.
+    and then download and search those articles for the search terms, and/or
+    build a concordance of all words, digrams and trigrams in JASSS.
 
     summary file: markdown format file giving detailed search results
     search terms...: one or more (case insensitive) search terms
 
-    options...:
+    general options...:
 \t-a (--include-all): search review, forum and research articles
-\t-b (--hist-file-bins) <file> <n>: prepare a histogram in CSV file with n bins
-\t-c (--context): number of characters to display around each occurrence
-\t-C (--concordance) <file>: prepare a concordance in CSV file
 \t-f (--include-forum): include forum articles in the search
 \t-F (--only-forum): only search forum articles
 \t-h (--help): display this message
-\t-H (--histogram) <file>: prepare a histogram in CSV file with $max_hist_bins bins
 \t-i (--agent-id) <ID>: agent ID to use in HTTP GET
 \t-j (--jasss-url) <URL>: page to access JASSS index from (default $index_url)
-\t-k (--include-keywords): include keywords in concordance
-\t-K (--keywords-url) <URL>: page to load keywords from (default $keywords_url)
-\t-m (--minimum-frequency) <n>: only include papers mentioning search term >= n times
-\t-p (--maximum-polysemy) <n>: maximum polysemy count to include term in concordance
 \t-r (--include-reviews): include review articles in the search (requires -T)
 \t-R (--only-reviews): only search review articles (requires -T)
 \t-s (--save-cache) <dir>: cache downloaded articles in dir
 \t-T (--text-all): search in all text not just numbered paragraphs (allows -r and -R)
 \t-t (--save-tags) <file>: save tags in paragraph text to CSV file
 \t-u (--use-cache) <dir>: use cache in dir
+
+    search options...:
+\t-b (--hist-file-bins) <file> <n>: prepare a histogram in CSV file with n bins
+\t-H (--histogram) <file>: prepare a histogram in CSV file with $max_hist_bins bins
+\t-m (--minimum-frequency) <n>: only include papers mentioning search term >= n times
+
+    concordance options...:
+\t-C (--concordance) <file>: prepare a concordance in CSV file
+\t-k (--include-keywords): include keywords in concordance
+\t-K (--keywords-url) <URL>: page to load keywords from (default $keywords_url)
+\t-p (--maximum-polysemy) <n>: maximum polysemy count to include term in concordance (implies -w)
+\t-w (--use-WordNet): use WordNet to get polysemy count
+\t-W (--with-WordNet) <exe>: where to find WordNet (default $wn) (implies -w)
+
+WordNet is a registered trade name of Princeton University
 USAGE_END
     exit 0;
   }
@@ -287,19 +297,44 @@ USAGE_END
   }
 }
 
-my $summary_file = shift(@ARGV);
-my @search_terms = @ARGV;
+my $summary_file;
+my @search_terms;
+
+if(scalar(@ARGV) == 0) {
+  if(!$concordance) {
+    die "Usage: $0 [options/--help] <summary.md> <search terms...>\n";
+  }
+  else {
+    $do_search = 0;
+  }
+}
+elsif(scalar(@ARGV) == 1) {
+  if(!$concordance) {
+    die "Usage: $0 [options/--help] <summary.md> <search terms...>\n";
+  }
+  else {
+    $summary_file = shift(@ARGV);
+    $do_search = 0;
+    $concordance_md = 1;
+  }
+}
+else {
+  $summary_file = shift(@ARGV);
+  @search_terms = @ARGV;
+}
 
 if($include_research + $include_reviews + $include_forum == 0) {
   die "The options you've selected to search for articles mean none will be searched.\n"
 }
-if(scalar(@search_terms) == 0) {
+if(scalar(@search_terms) == 0 && !$concordance) {
   die "No search terms provided.\n";
 }
 
 if($include_reviews && $only_text) {
   die "Including reviews in the search means you can't only extract text from numbered paragraphs\n";
 }
+
+my $search_time = localtime->datetime;
 
 if($cache > 0) {
   if(-e "$cache_dir" && !(-d "$cache_dir")) {
@@ -311,9 +346,18 @@ if($cache > 0) {
   else {
     warn "Cache directory $cache_dir exists -- files will be over-written\n";
   }
+  open(FP, ">", "$cache_dir/DATE") or die "Cannot create $cache_dir/DATE: $!\n";
+  print FP "$search_time\n";
+  close(FP);
 }
-elsif($cache < 0 && !(-d "$cache_dir")) {
-  die "Cache directory $cache_dir does not exist or is not a directory, so cannot use it\n";
+elsif($cache < 0) {
+  if(!(-d "$cache_dir")) {
+    die "Cache directory $cache_dir does not exist or is not a directory, so cannot use it\n";
+  }
+  open(FP, "<", "$cache_dir/DATE") or die "Cannot read $cache_dir/DATE: $!\n";
+  $search_time = <FP>;
+  $search_time =~ s/\s+$//;
+  close(FP);
 }
 
 foreach my $ignore_word (@ignore_words) {
@@ -360,7 +404,6 @@ else {
 
 # Extract a list of JASSS articles from the index page
 
-my $search_time = localtime->datetime;
 my $index = WWW::Mechanize->new(agent => $agent_id);
 
 $index->get($index_url);
@@ -498,8 +541,62 @@ foreach my $article (@articles) {
       close(FP);
     }
   }
-
+  $html =~ s/\s+/ /g;
   $html = &uncomment_html($html);
+
+  my $title;
+  my @date;
+
+  if($html =~ /<meta name="DC.Title" content="([^"]+)" ?\/?>/i) {
+    $title = $1;
+  }
+  elsif($html =~ /<meta content="([^"]+)" name="DC.Title" ?\/?>/i) {
+    $title = $1;
+  }
+  if(defined($title)) {
+    $title =~ s/^\s+//;   # Sometimes there is space before the quotes
+    $title =~ s/\s+$//;   # Sometimes after
+    $titles{$$article[0]} = $title;
+  }
+
+  if($html =~ /<meta name="DC.(Date|Issued)" content=" ?(\d+)-([A-Za-z0-9]+)-(\d+) ?" ?\/?>/i) {
+    @date = ($2, $3, $4);
+  }
+  elsif($html =~ /<meta content=" ?(\d+)-([A-Za-z0-9]+)-(\d+) ?" name="DC.(Date|Issued)" ?\/?>/i) {
+    @date = ($1, $2, $3);
+  }
+  if(scalar(@date) > 0) {
+    my $yr = ($date[1] =~ /[A-Za-z]/) ? $date[2] : $date[0];
+    if($yr < 1900) {
+      if($yr >= 97) {
+        $yr += 1900;
+      }
+      else {
+        $yr += 2000;
+      }
+    }
+    $years{$$article[0]} = $yr;
+  }
+
+  if(defined($years{$$article[0]})) {
+    my $yr = $years{$$article[0]};
+    my $author;
+
+    if($html =~ /<meta name="DC.Creator" content="([^"]+)" ?\/?>/i) {
+      $author = $1;
+    }
+    elsif($html =~ /<meta content="([^"]+)" name="DC.Creator" ?\/?>/i) {
+      $author = $1;
+    }
+
+    if(defined($author)) {
+      if($author =~ /^([^,]+,)/) {
+        $author = "$1 et al.";
+      }
+
+      $auyr{$$article[0]} = "$author ($yr)";
+    }
+  }
 
   $n_searched++;
 
@@ -540,35 +637,42 @@ foreach my $article (@articles) {
     $paras{'all'} = $text;
   }
 
-  foreach my $search_term (@search_terms) {
-
-    my @all_sentences;
-
-    foreach my $para (sort {
-      my ($a_sec, $a_no) = split(/\./, $a);
-      my ($b_sec, $b_no) = split(/\./, $b);
-
-      $a_sec <=> $b_sec || $a_no <=> $b_no;
-    } keys(%paras)) {
+  if($concordance) {
+    foreach my $para (keys(%paras)) {
       my $txt = $paras{$para};
-
-      if($txt =~ /\W$search_term\W/i) {
-        my $sent_arr = &extract_sentences($$article[0], $para, $txt, $search_term);
-
-        push(@all_sentences, @$sent_arr);
-      }
-
-      if($concordance) {
-        &do_concordance($$article[0], $para, $txt);
-      }
+      &do_concordance($$article[0], $para, $txt);
     }
+  }
 
-    if(scalar(@all_sentences) > 0) {
-      $counts{$search_term}++;
-      $sentences{$search_term}->{$$article[0]} = \@all_sentences;
-      my $n = scalar(@all_sentences);
-      $hists{$search_term}->[$n]++;
-      $max_n = $n if $max_n < $n;
+  if($do_search) {
+    foreach my $search_term (@search_terms) {
+
+      my @all_sentences;
+
+      $n_occurs{$search_term}->{$$article[0]} = 0;
+
+      foreach my $para (sort {
+        my ($a_sec, $a_no) = split(/\./, $a);
+        my ($b_sec, $b_no) = split(/\./, $b);
+
+        $a_sec <=> $b_sec || $a_no <=> $b_no;
+      } keys(%paras)) {
+        my $txt = $paras{$para};
+
+        if($txt =~ /\W$search_term\W/i) {
+          my $sent_arr = &extract_sentences($$article[0], $para, $txt, $search_term);
+
+          push(@all_sentences, @$sent_arr);
+        }
+      }
+
+      if(scalar(@all_sentences) > 0) {
+        $counts{$search_term}++;
+        $sentences{$search_term}->{$$article[0]} = \@all_sentences;
+        my $n = $n_occurs{$search_term}->{$$article[0]};
+        $hists{$search_term}->[$n]++;
+        $max_n = $n if $max_n < $n;
+      }
     }
   }
 }
@@ -664,42 +768,49 @@ if($concordance) {
 
 # Save a markdown file
 
-open(FP, ">", $summary_file)
-  or die "Cannot create summary markdown file $summary_file: $!\n";
+if($do_search) {
+  open(FP, ">", $summary_file)
+    or die "Cannot create summary markdown file $summary_file: $!\n";
 
-print FP "# JASSS article search results\n";
-print FP "Search (using [search-JASSS.pl](https://github.com/garypolhill/search-JASSS)) ",
-  "of $n_searched articles out of all the ", scalar(@articles)," JASSS ",
-  "$searched_text listed on the [JASSS article index page]($index_url) as at ",
-  "$search_time. Search is for whole words (case insensitive), and articles are ",
-  "listed in descending order of the number of times the search term appears, ",
-  "with a minimum occurrence of $min_freq.\n";
-foreach my $search_term (sort @search_terms) {
+  print FP "# JASSS article search results\n";
+  print FP "Search (using [search-JASSS.pl](https://github.com/garypolhill/search-JASSS)) ",
+    "of $n_searched articles out of all the ", scalar(@articles)," JASSS ",
+    "$searched_text listed on the [JASSS article index page]($index_url) as at ",
+    "$search_time. Search is for whole words (case insensitive), and articles are ",
+    "listed in descending order of the number of times the search term appears, ",
+    "with a minimum occurrence of $min_freq.\n";
 
-  if($counts{$search_term} > 0) {
-    print FP "## Search term `$search_term`\n";
+  foreach my $search_term (sort @search_terms) {
 
-    foreach my $article (sort {
-        scalar(@{$sentences{$search_term}->{$b}}) <=> scalar(@{$sentences{$search_term}->{$a}})
+    if($counts{$search_term} > 0) {
+      print FP "## Search term `$search_term`\n";
+
+      foreach my $article (sort {
+        $n_occurs{$search_term}->{$b} <=> $n_occurs{$search_term}->{$a};
       } keys(%{$sentences{$search_term}})) {
 
-      my $n = scalar(@{$sentences{$search_term}->{$article}});
+        my $n = $n_occurs{$search_term}->{$article};
 
-      if($n >= $min_freq) {
-        print FP "### Article [$article]($article) ($n times)\n";
+        if($n >= $min_freq) {
+          my $title = defined($titles{$article}) ? "\"[$titles{$article}]($article)\"" : "[$article]($article)";
+          if(defined($auyr{$article})) {
+            $title = $auyr{$article}." $title";
+          }
+          print FP "### $title ($n times)\n";
 
-        foreach my $sentence (@{$sentences{$search_term}->{$article}}) {
-          print FP "  + $sentence\n";
+          foreach my $sentence (@{$sentences{$search_term}->{$article}}) {
+            print FP "  + $sentence\n";
+          }
         }
       }
     }
+    else {
+      print FP "## Search term `$search_term`\nNot found.\n"
+    }
   }
-  else {
-    print FP "## Search term `$search_term`\nNot found.\n"
-  }
-}
 
-close(FP);
+  close(FP);
+}
 
 exit 0;
 
@@ -708,20 +819,49 @@ sub extract_sentences {
 
   my @sentences;
 
-  my @occurs = split(/\W$term\W/i, $text);
+  my @textsents = split(/(\.\s+[A-Z])/, $text);
 
-  # For now, lazy approach: print 50 characters either side
-
-  for(my $i = 1; $i <= $#occurs; $i++) {
-    my $sentence =
-      substr($occurs[$i - 1], -$n_context)." **$term** ".substr($occurs[$i], 0, $n_context);
-    $sentence =~ s/[^[:ascii:]]/?/g; # Get rid of non-ASCII characters
-
-    if($para ne "all") {
-      $sentence = "(para [$para]($article#$para)) $sentence";
+  my $prevcap = "";
+  foreach my $textsent (@textsents) {
+    if(substr($textsent, 0, 1) eq ".") {
+      $prevcap = substr($textsent, -1, 1);
     }
+    else {
+      my $whole_sentence = $prevcap.$textsent.".";
+      # $sentence =~ s/[^[:ascii:]]/?/g; # Get rid of non-ASCII characters
+      # Commented out to remember how it's done; but should not be necessary
+      # now we've assumed UTF-8 output streams by default on line 1.
 
-    push(@sentences, $sentence);
+      $whole_sentence =~ s/^\s*\d+\.\d+//; # Sometimes the paragraph number slips in
+      $whole_sentence =~ s/^\s+//;
+      $whole_sentence = " $whole_sentence";
+
+      if($whole_sentence =~ /\W$term\W/i) {
+        my @occurs = split(/(\W$term\W)/i, $whole_sentence);
+
+        my $sentence = ($para eq "all" ? "" : "(para [$para]($article#$para))");
+
+        my $n = 0;
+        foreach my $occur (@occurs) {
+          if($occur =~ /\W$term\W/i) {
+            $sentence .= substr($occur, 0, 1)."**".substr($occur, 1, -1)."**".substr($occur, -1, 1);
+            $n++;
+          }
+          else {
+            # Remove confounding markdown
+            $occur =~ s/\*/ /g;
+            $occur =~ s/\_/ /g;
+            $occur =~ s/\`/ /g;
+            $sentence .= $occur;
+          }
+        }
+
+        $sentence =~ s/\.\s*\.$/./;
+
+        push(@sentences, $sentence);
+        $n_occurs{$term}->{$article} += $n;
+      }
+    }
   }
 
   return \@sentences;
@@ -877,7 +1017,7 @@ sub do_concordance {
       }
     }
     foreach my $word (@words) {
-      if(!defined($ignore{$word})) {
+      if(!defined($ignore{$word}) || $max_polysemy < 0) {
         if(!defined($added{$word})) {
           push(@{$concord{$word}}, [$url, $para]);
         }
@@ -909,19 +1049,22 @@ sub save_concordance {
   open(FP, ">", $concordance_file)
     or die "Cannot create concordance file $concordance_file: $!\n";
 
-  if(substr($concordance_file, -4) eq ".csv") {
-    print FP "Term,Term.N,", ($use_word_net ? "Familiarity," : ""),
-      ($keywords ? "Keyword," : ""), "Article,Article.N,Para,Para.N\n";
-  }
-  else {
-    print FP "# Concordance of [JASSS]($index_url) articles $search_time\n";
+  print FP "Term,Term.N,", ($use_word_net ? "Familiarity," : ""),
+    ($keywords ? "Keyword," : ""), "Article,Article.Y,Article.N,Para,Para.N\n";
+
+  if($concordance_md) {
+    open(MD, ">", $summary_file)
+      or die "Cannot create concordance markdown file $summary_file: $!\n";
+
+    print MD "# Concordance of [JASSS]($index_url) articles $search_time\n";
+
     if($use_word_net) {
-      print FP "Familiarity (polysemy count) provided by ",
+      print MD "Familiarity (polysemy count) provided by ",
         "[WordNet](https://wordnet.princeton.edu), which is a registered trade ",
         "name of Princeton University\n";
     }
     if($keywords) {
-      print FP "Concordance includes JASSS's list of [keywords]($keywords_url)\n";
+      print MD "Concordance includes JASSS's list of [keywords]($keywords_url)\n";
     }
   }
 
@@ -929,7 +1072,7 @@ sub save_concordance {
 
     my $familiarity = ($use_word_net ? &wn_familiarity($term) : 0);
 
-    if($familiarity <= $max_polysemy || defined($kw{$term})) {
+    if($familiarity <= $max_polysemy || $max_polysemy == 0 || defined($kw{$term})) {
       my @refs = @{$concord{$term}};
       my $n = scalar(@refs);
 
@@ -961,6 +1104,8 @@ sub save_concordance {
 
         my ($url, $para) = split(/\#/, $paraurl);
 
+        my $year = defined($years{$url}) ? $years{$url} : "NA";
+
         my $short_url = $url;
         $short_url =~ s/^https?:\/\///;
         $short_url =~ s/\.html?$//;
@@ -968,27 +1113,30 @@ sub save_concordance {
         shift(@su); # Chuck out the domain
         $short_url = join("/", @su);
 
-        if(substr($concordance_file, -4) eq ".csv") {
-          print FP "$term,$n,";
-          print FP "$familiarity," if $use_word_net;
-          print FP (defined($kw{$term}) ? "T," : "F,") if $keywords;
-          print FP "$short_url,$urls{$url},$short_url#$para,$paras{$paraurl}\n";
-        }
-        else {
-          print FP "\n## $term ($n)\n" if !defined($prev_url);
+        print FP "$term,$n,";
+        print FP "$familiarity," if $use_word_net;
+        print FP (defined($kw{$term}) ? "T," : "F,") if $keywords;
+        print FP "$short_url,$year,$urls{$url},$short_url#$para,$paras{$paraurl}\n";
+
+        if($concordance_md) {
+          print MD "\n## $term ($n)\n" if !defined($prev_url);
           if(!defined($prev_url) || $url ne $prev_url) {
-            print FP "\n### [$short_url]($url) ($urls{$url})";
+            print MD "\n### [$short_url]($url) ($urls{$url})";
             $prev_url = $url;
           }
           else {
-            print FP ", ";
+            print MD ", ";
           }
-          print FP "[$para]($paraurl) ($paras{$paraurl})";
+          print MD "[$para]($paraurl) ($paras{$paraurl})";
         }
       }
     }
   }
-  print FP "\n" if substr($concordance_file, -4) ne ".csv";
+
+  if($concordance_md) {
+    print MD "\n";
+    close(MD);
+  }
 
   close(FP);
 }
