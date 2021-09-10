@@ -986,11 +986,11 @@ sub untag_text {
 sub do_concordance {
   my ($url, $para, $text) = @_;
 
-  $para =~ s/n't/ not/g;
-  $para =~ s/'ll/ will/g;
-  $para =~ s/'ve/ have/g;
-  $para =~ s/'re/ are/g;
-  my @phrases = split(/[.;,:'"()!?]/, $para);
+  $text =~ s/n't/ not/g;
+  $text =~ s/'ll/ will/g;
+  $text =~ s/'ve/ have/g;
+  $text =~ s/'re/ are/g;
+  my @phrases = split(/[.;,:'"()!?]/, $text);
 
   foreach my $phrase (@phrases) {
     my $lc_phrase = $phrase;
@@ -1068,7 +1068,7 @@ sub save_concordance {
     }
   }
 
-  foreach my $term (sort {$a <=> $b} keys(%concord)) {
+  foreach my $term (sort {$a cmp $b} keys(%concord)) {
 
     my $familiarity = ($use_word_net ? &wn_familiarity($term) : 0);
 
@@ -1121,7 +1121,7 @@ sub save_concordance {
         if($concordance_md) {
           print MD "\n## $term ($n)\n" if !defined($prev_url);
           if(!defined($prev_url) || $url ne $prev_url) {
-            print MD "\n### [$short_url]($url) ($urls{$url})";
+            print MD "\n### [$short_url]($url) ($urls{$url})\n";
             $prev_url = $url;
           }
           else {
