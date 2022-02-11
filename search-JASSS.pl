@@ -1168,6 +1168,11 @@ sub uncomment_html {
 sub wn_familiarity {
   my ($term) = @_;
 
+  $term =~ s/[^[:ascii:]]//g;
+  $term =~ s/[^a-z ]//g;
+  if($term !~ /[a-z]/) {
+    return 0;
+  }
   my @famls;
   open(FP, "-|", "$wn \"$term\"")
     or die "Cannot open pipe from WordNet $wn \"$term\": $!\n";
